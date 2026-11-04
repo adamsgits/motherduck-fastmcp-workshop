@@ -3,21 +3,29 @@
 FastMCP Gateway runs this file. Its entrypoint setting is `server.py:mcp`.
 """
 
+import logging
 import re
+import sys
 from collections import Counter, defaultdict
 from statistics import median
 from typing import Annotated, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from fastmcp.utilities.logging import get_logger
 from pydantic import Field
 
 from sf311.data import BY_ID, LOCAL_NAMES, NEIGHBORHOODS, REQUESTS, SERVICES, Request, closest
 from sf311.kit import caller_email
 
 mcp = FastMCP("sf-311")
-log = get_logger("sf311")
+# A plain one-line handler: FastMCP's Rich handler wraps long lines, which splits
+# the caller onto a second line that log viewers can drop.
+log = logging.getLogger("sf311")
+log.setLevel(logging.INFO)
+if not log.handlers:
+    _handler = logging.StreamHandler(sys.stderr)
+    _handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+    log.addHandler(_handler)
 
 MAX_ROWS = 50
 MIN_CLOSED_FOR_MEDIAN = 10
@@ -177,7 +185,7 @@ def get_request(request_id: str) -> dict:
     Use this when you already have an ID (for example from search_requests).
     To find requests by service or neighborhood, use search_requests.
     """
-    log.info("get_request request_id=%s caller=%s", request_id, caller_email() or "local")
+    log.info("get_request caller=%s request_id=%s", caller_email() or "local", request_id)
     request = BY_ID.get(request_id.strip())
     if request is None:
         raise ToolError(f"No request with id '{request_id}'. Use search_requests to find valid request IDs.")
