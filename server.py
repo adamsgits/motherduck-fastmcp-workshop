@@ -10,12 +10,13 @@ from collections import Counter, defaultdict
 from statistics import median
 from typing import Annotated, Literal
 
-from fastmcp import FastMCP
+from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mcp.types import InputRequiredResult
 from pydantic import Field
 
 from sf311.data import BY_ID, LOCAL_NAMES, NEIGHBORHOODS, REQUESTS, SERVICES, Request, closest
-from sf311.kit import caller_email
+from sf311.kit import ask_choice, caller_email, read_choice
 
 mcp = FastMCP("sf-311")
 # A plain one-line handler: FastMCP's Rich handler wraps long lines, which splits
@@ -196,6 +197,90 @@ def close_time_stats(
         "fastest_request_id": fastest.request_id,
         "slowest_request_id": slowest.request_id,
     }
+
+
+def _overlaps(local_name: str) -> list[str]:
+    """Official neighborhoods a local name overlaps, most requests first."""
+    counts = Counter(r.neighborhood for r in REQUESTS if r.local_name == local_name and r.neighborhood)
+    return [n for n, _ in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+
+
+def _resolve_name(name: str) -> tuple[str, bool]:
+    """Return (canonical name, is_official) for an official or local neighborhood name."""
+    cleaned = name.strip()
+    for choices, official in ((NEIGHBORHOODS, True), (LOCAL_NAMES, False)):
+        by_lower = {choice.lower(): choice for choice in choices}
+        if cleaned.lower() in by_lower:
+            return by_lower[cleaned.lower()], official
+    suggestions = closest(cleaned, NEIGHBORHOODS + LOCAL_NAMES)
+    hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+    raise ToolError(
+        f"Unknown neighborhood '{name}'.{hint} Call dataset_info for the official names, "
+        "or try a common local name such as 'Lower Nob Hill'."
+    )
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
+def count_in_neighborhood(
+    ctx: Context,
+    name: Annotated[
+        str,
+        Field(description="An official neighborhood (e.g. 'Mission') or a local name (e.g. 'Lower Nob Hill')."),
+    ],
+    boundary: Annotated[
+        str | None,
+        Field(
+            description="For a local name that spans several official neighborhoods: one of those "
+            "neighborhoods, or 'all' for the whole local area. Leave empty to ask the user."
+        ),
+    ] = None,
+) -> int | str | InputRequiredResult:
+    """Count this week's 311 requests in a neighborhood, by official or local name.
+
+    Returns a number. Use this when the user names a place the way people
+    say it, such as 'Lower Nob Hill' or 'Duboce Triangle', not just the 41
+    official neighborhoods. An official name is counted directly. A local name
+    that overlaps one official neighborhood counts that local area. A local
+    name that spans several asks the user which part to count, unless you pass
+    boundary (one of the overlapped neighborhoods, or 'all'). If the user
+    declines, returns a message saying nothing was counted: then pass
+    boundary='all' or the part they want. For counts by service or broken down
+    by a field, use count_requests.
+    """
+    canonical, official = _resolve_name(name)
+    if official and boundary is None:
+        return sum(1 for r in REQUESTS if r.neighborhood == canonical)
+
+    parts = _overlaps(canonical) if not official else [canonical]
+    in_area = [r for r in REQUESTS if (r.neighborhood if official else r.local_name) == canonical]
+    if boundary is None and len(parts) <= 1:
+        return len(in_area)
+
+    if boundary is None:
+        all_option = f"All of {canonical}"
+        answer = read_choice(ctx, "boundary")
+        if answer is None:
+            return ask_choice(
+                "boundary",
+                f"'{canonical}' spans {len(parts)} official neighborhoods. Which part should I count?",
+                parts + [all_option],
+            )
+        if not answer.accepted:
+            return (
+                f"Nothing was counted: the user did not choose which part of {canonical} to count. "
+                f"Call again with boundary='all' or one of: {', '.join(parts)}."
+            )
+        boundary = "all" if answer.value == all_option else answer.value
+
+    if boundary.strip().lower() == "all":
+        return len(in_area)
+    by_lower = {part.lower(): part for part in parts}
+    chosen = by_lower.get(boundary.strip().lower())
+    if chosen is None:
+        raise ToolError(
+            f"'{boundary}' is not part of {canonical}. Use 'all' or one of: {', '.join(parts)}."
+        )
+    return sum(1 for r in in_area if r.neighborhood == chosen)
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
