@@ -3,17 +3,21 @@
 FastMCP Gateway runs this file. Its entrypoint setting is `server.py:mcp`.
 """
 
+import re
 from collections import Counter, defaultdict
 from statistics import median
 from typing import Annotated, Literal
 
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from fastmcp.utilities.logging import get_logger
 from pydantic import Field
 
 from sf311.data import BY_ID, LOCAL_NAMES, NEIGHBORHOODS, REQUESTS, SERVICES, Request, closest
+from sf311.kit import caller_email
 
 mcp = FastMCP("sf-311")
+log = get_logger("sf311")
 
 MAX_ROWS = 50
 MIN_CLOSED_FOR_MEDIAN = 10
@@ -33,6 +37,28 @@ ServiceArg = Annotated[str | None, Field(description="Exact service name from da
 NeighborhoodArg = Annotated[
     str | None, Field(description="Exact official neighborhood name from dataset_info, e.g. 'Mission'.")
 ]
+
+
+HOUSE_NUMBER = re.compile(r"^(\d+)\s+([^,]+)")
+
+
+def mask_address(address: str) -> str:
+    """Reduce an address to its block: "994 HARRISON ST, ..." -> "900 block of HARRISON ST".
+
+    Addresses without a leading house number (intersections, etc.) are returned unchanged.
+    """
+    match = HOUSE_NUMBER.match(address)
+    if not match:
+        return address
+    block = int(match.group(1)) // 100 * 100
+    return f"{block} block of {match.group(2).strip()}"
+
+
+def _public(request: Request) -> dict:
+    """A request as a dict, safe to return to the model (address masked to the block)."""
+    row = request.as_dict()
+    row["address"] = mask_address(row["address"])
+    return row
 
 
 def _check_name(value: str | None, choices: list[str], kind: str) -> None:
@@ -132,27 +158,30 @@ def search_requests(
 
     Returns up to `limit` (max 50) requests, each with request_id, opened,
     closed, status, service, subtype, agency, neighborhood, local_name,
-    address and source. Use this to look at examples or details. It is a
+    address (to the block only, e.g. '900 block of HARRISON ST') and
+    source. Use this to look at examples or details. It is a
     sample, not a full result: for totals or rankings use count_requests,
     and for close times use median_close_hours. To fetch one known request,
     use get_request.
     """
     rows = _matching(service, neighborhood, status)
     rows.sort(key=lambda r: r.opened, reverse=True)
-    return [r.as_dict() for r in rows[:limit]]
+    return [_public(r) for r in rows[:limit]]
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
 def get_request(request_id: str) -> dict:
     """Return one 311 request by its request_id, with all its fields.
 
+    The address is given only to the block (e.g. '900 block of HARRISON ST').
     Use this when you already have an ID (for example from search_requests).
     To find requests by service or neighborhood, use search_requests.
     """
+    log.info("get_request request_id=%s caller=%s", request_id, caller_email() or "local")
     request = BY_ID.get(request_id.strip())
     if request is None:
         raise ToolError(f"No request with id '{request_id}'. Use search_requests to find valid request IDs.")
-    return request.as_dict()
+    return _public(request)
 
 
 if __name__ == "__main__":
