@@ -156,6 +156,49 @@ def median_close_hours(
 
 
 @mcp.tool(annotations={"readOnlyHint": True})
+def close_time_stats(
+    service: ServiceArg = None,
+    neighborhood: NeighborhoodArg = None,
+) -> dict:
+    """Fastest, median and slowest close times, in hours, for closed requests.
+
+    Returns closed_requests (how many matched and have closed), plus
+    fastest_hours, median_hours and slowest_hours (rounded to 0.01), and the
+    request_id of the fastest and slowest requests. closed_before_opened
+    counts source records whose close time precedes their open time (a data
+    quality issue); they can make fastest_hours negative. The hours are null
+    when nothing matching has closed. Use this for "longest" / "shortest" / "max" /
+    "min" time-to-close questions, e.g. "the longest any Sidewalk and Curb
+    request took to close" (service="Sidewalk and Curb", read slowest_hours).
+    Pass a request_id to get_request for its details. For a per-neighborhood
+    or per-agency ranking of typical times, use median_close_hours instead.
+    Open requests are ignored.
+    """
+    rows = [r for r in _matching(service, neighborhood) if r.hours_to_close is not None]
+    if not rows:
+        return {
+            "closed_requests": 0,
+            "closed_before_opened": 0,
+            "fastest_hours": None,
+            "median_hours": None,
+            "slowest_hours": None,
+            "fastest_request_id": None,
+            "slowest_request_id": None,
+        }
+    fastest = min(rows, key=lambda r: r.hours_to_close)
+    slowest = max(rows, key=lambda r: r.hours_to_close)
+    return {
+        "closed_requests": len(rows),
+        "closed_before_opened": sum(1 for r in rows if r.hours_to_close < 0),
+        "fastest_hours": round(fastest.hours_to_close, 2),
+        "median_hours": round(median(r.hours_to_close for r in rows), 2),
+        "slowest_hours": round(slowest.hours_to_close, 2),
+        "fastest_request_id": fastest.request_id,
+        "slowest_request_id": slowest.request_id,
+    }
+
+
+@mcp.tool(annotations={"readOnlyHint": True})
 def search_requests(
     service: ServiceArg = None,
     neighborhood: NeighborhoodArg = None,
